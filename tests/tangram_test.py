@@ -215,3 +215,131 @@ def test_eval_metric(df_all_genes):
     auc_score = tg.eval_metric(df_all_genes)[0]["auc_score"]
     assert auc_score == approx(0.750597829464878)
 
+
+# test create_segment_cell_df function
+
+
+@pytest.fixture
+def ad_sp_segmentation():
+    """Create a mock spatial AnnData with image_features for segmentation testing."""
+    X = np.array([[1, 2], [3, 4], [5, 6]])
+    obs = pd.DataFrame(index=["spot_0", "spot_1", "spot_2"])
+    var = pd.DataFrame(index=["gene_a", "gene_b"])
+    ad_sp = sc.AnnData(X=X, obs=obs, var=var)
+    
+    # Create image_features DataFrame with segmentation data
+    # Each spot has different number of segmented cells
+    image_features = pd.DataFrame(
+        {
+            "segmentation_centroid": [
+                [(10.0, 20.0), (15.0, 25.0)],  # spot_0 has 2 cells
+                [(30.0, 40.0)],                 # spot_1 has 1 cell
+                [(50.0, 60.0), (55.0, 65.0), (58.0, 68.0)],  # spot_2 has 3 cells
+            ],
+            "segmentation_label": [2, 1, 3],  # number of cells per spot
+        },
+        index=["spot_0", "spot_1", "spot_2"],
+    )
+    ad_sp.obsm["image_features"] = image_features
+    return ad_sp
+
+
+@pytest.fixture
+def ad_sp_segmentation_with_nan():
+    """Create a mock spatial AnnData with some NaN centroids."""
+    X = np.array([[1, 2], [3, 4]])
+    obs = pd.DataFrame(index=["spot_0", "spot_1"])
+    var = pd.DataFrame(index=["gene_a", "gene_b"])
+    ad_sp = sc.AnnData(X=X, obs=obs, var=var)
+    
+    image_features = pd.DataFrame(
+        {
+            "segmentation_centroid": [
+                [(10.0, 20.0)],  # spot_0 has 1 cell
+                [],              # spot_1 has no cells (will produce NaN)
+            ],
+            "segmentation_label": [1, 0],
+        },
+        index=["spot_0", "spot_1"],
+    )
+    ad_sp.obsm["image_features"] = image_features
+    return ad_sp
+
+
+@pytest.fixture
+def ad_sp_no_image_features():
+    """Create a mock spatial AnnData without image_features."""
+    X = np.array([[1, 2]])
+    obs = pd.DataFrame(index=["spot_0"])
+    var = pd.DataFrame(index=["gene_a", "gene_b"])
+    ad_sp = sc.AnnData(X=X, obs=obs, var=var)
+    return ad_sp
+
+
+def test_create_segment_cell_df_basic(ad_sp_segmentation):
+    """Test basic functionality of create_segment_cell_df."""
+    tg.create_segment_cell_df(ad_sp_segmentation)
+    
+    # Check that the segmentation dataframe was created
+    assert "tangram_cell_segmentation" in ad_sp_segmentation.uns
+    
+    df = ad_sp_segmentation.uns["tangram_cell_segmentation"]
+    
+    # Check columns
+    assert set(df.columns) == {"spot_idx", "y", "x", "centroids"}
+    
+    # Check total number of rows (2 + 1 + 3 = 6 cells total)
+    assert len(df) == 6
+    
+    # Check that centroids are properly formatted
+    assert "spot_0_0" in df["centroids"].values
+    assert "spot_0_1" in df["centroids"].values
+    assert "spot_1_0" in df["centroids"].values
+    assert "spot_2_0" in df["centroids"].values
+    assert "spot_2_1" in df["centroids"].values
+    assert "spot_2_2" in df["centroids"].values
+
+
+def test_create_segment_cell_df_missing_image_features(ad_sp_no_image_features):
+    """Test that create_segment_cell_df raises error when image_features is missing."""
+    with pytest.raises(ValueError) as exc_info:
+        tg.create_segment_cell_df(ad_sp_no_image_features)
+    
+    assert "Missing parameter for tangram deconvolution" in str(exc_info.value)
+
+
+def test_create_segment_cell_df_drop_nan_true(ad_sp_segmentation_with_nan):
+    """Test create_segment_cell_df with drop_nan=True (default)."""
+    tg.create_segment_cell_df(ad_sp_segmentation_with_nan, drop_nan=True)
+    
+    df = ad_sp_segmentation_with_nan.uns["tangram_cell_segmentation"]
+    
+    # Should only have the one valid cell from spot_0
+    assert len(df) == 1
+    assert "spot_0_0" in df["centroids"].values
+
+
+def test_create_segment_cell_df_drop_nan_false(ad_sp_segmentation_with_nan):
+    """Test create_segment_cell_df with drop_nan=False."""
+    tg.create_segment_cell_df(ad_sp_segmentation_with_nan, drop_nan=False)
+    
+    df = ad_sp_segmentation_with_nan.uns["tangram_cell_segmentation"]
+    
+    # Should include the NaN row as well
+    assert len(df) >= 1
+    # The NaN centroid should be converted to string "NaN"
+    assert any(df["centroids"] == "NaN") or "spot_0_0" in df["centroids"].values
+
+
+def test_create_segment_cell_df_coordinates(ad_sp_segmentation):
+    """Test that coordinates are correctly extracted."""
+    tg.create_segment_cell_df(ad_sp_segmentation)
+    
+    df = ad_sp_segmentation.uns["tangram_cell_segmentation"]
+    
+    # Check specific coordinate values for spot_0's first cell
+    spot0_cell0 = df[df["centroids"] == "spot_0_0"]
+    assert len(spot0_cell0) == 1
+    assert spot0_cell0["y"].values[0] == 10.0
+    assert spot0_cell0["x"].values[0] == 20.0
+

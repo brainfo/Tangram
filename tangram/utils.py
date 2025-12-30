@@ -153,7 +153,7 @@ def project_cell_annotations(
     )
 
 
-def create_segment_cell_df(adata_sp):
+def create_segment_cell_df(adata_sp, drop_nan=True):
     """
     Produces a Pandas dataframe where each row is a segmentation object, columns reveals its position information.
 
@@ -163,7 +163,6 @@ def create_segment_cell_df(adata_sp):
     Returns:
         None.
         Update spatial AnnData.uns['tangram_cell_segmentation'] with a dataframe: each row represents a segmentation object (single cell/nuclei). Columns are 'spot_idx' (voxel id), and 'y', 'x', 'centroids' to specify the position of the segmentation object.
-        Update spatial AnnData.obsm['trangram_spot_centroids'] with a sequence
     """
 
     if "image_features" not in adata_sp.obsm.keys():
@@ -192,15 +191,20 @@ def create_segment_cell_df(adata_sp):
         drop=False, inplace=True,
     )
 
+    if drop_nan:
+        segmentation_df = segmentation_df.dropna(subset=["centroids"])
+    segmentation_df["centroids"] = segmentation_df["centroids"].fillna("NaN").astype(str)
+
     adata_sp.uns["tangram_cell_segmentation"] = segmentation_df
-    adata_sp.obsm["tangram_spot_centroids"] = centroids["centroids_idx"]
     logging.info(
         f"cell segmentation dataframe is saved in `uns` `tangram_cell_segmentation` of the spatial AnnData."
     )
-    logging.info(
-        f"spot centroids is saved in `obsm` `tangram_spot_centroids` of the spatial AnnData."
-    )
-
+    ## redundant
+    # if save_obsm:
+    #     adata_sp.obsm["tangram_spot_centroids"] = centroids["centroids_idx"] ## join before this
+    #     logging.info(
+    #         f"spot centroids is saved in `obsm` `tangram_spot_centroids` of the spatial AnnData."
+    #     )
 
 def count_cell_annotations(
     adata_map, adata_sc, adata_sp, annotation="cell_type", threshold=0.5,

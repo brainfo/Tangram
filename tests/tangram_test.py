@@ -343,3 +343,166 @@ def test_create_segment_cell_df_coordinates(ad_sp_segmentation):
     assert spot0_cell0["y"].values[0] == 10.0
     assert spot0_cell0["x"].values[0] == 20.0
 
+# ============== Tests for updated storage locations ==============
+# Append these to test_tangram.py
+
+
+@pytest.fixture
+def ad_sp_with_segmentation():
+    """Spatial AnnData with tangram_cell_segmentation in uns."""
+    X = np.array([[1, 2], [3, 4], [5, 6]])
+    obs = pd.DataFrame(index=["spot_0", "spot_1", "spot_2"])
+    var = pd.DataFrame(index=["gene_a", "gene_b"])
+    ad_sp = sc.AnnData(X=X, obs=obs, var=var)
+    
+    ad_sp.obsm["spatial"] = np.array([[100, 200], [300, 400], [500, 600]])
+    
+    image_features = pd.DataFrame(
+        {
+            "segmentation_centroid": [
+                [(10.0, 20.0), (15.0, 25.0)],
+                [(30.0, 40.0)],
+                [(50.0, 60.0), (55.0, 65.0)],
+            ],
+            "segmentation_label": [2, 1, 2],
+        },
+        index=["spot_0", "spot_1", "spot_2"],
+    )
+    ad_sp.obsm["image_features"] = image_features
+    
+    # Pre-populate tangram_cell_segmentation (as created by create_segment_cell_df)
+    segmentation_df = pd.DataFrame({
+        "spot_idx": ["spot_0", "spot_0", "spot_1", "spot_2", "spot_2"],
+        "y": [10.0, 15.0, 30.0, 50.0, 55.0],
+        "x": [20.0, 25.0, 40.0, 60.0, 65.0],
+        "centroids": ["spot_0_0", "spot_0_1", "spot_1_0", "spot_2_0", "spot_2_1"],
+    })
+    ad_sp.uns["tangram_cell_segmentation"] = segmentation_df
+    
+    return ad_sp
+
+
+@pytest.fixture
+def ad_sc_with_celltypes():
+    """Single cell AnnData with cell type annotations."""
+    X = np.array([[1, 0], [0, 1], [1, 1], [0, 0], [1, 0]])
+    obs = pd.DataFrame({
+        "cell_type": ["TypeA", "TypeB", "TypeA", "TypeB", "TypeA"]
+    }, index=["cell_0", "cell_1", "cell_2", "cell_3", "cell_4"])
+    var = pd.DataFrame(index=["gene_a", "gene_b"])
+    return sc.AnnData(X=X, obs=obs, var=var)
+
+
+@pytest.fixture
+def ad_map_mock(ad_sc_with_celltypes, ad_sp_with_segmentation):
+    """Mock mapping AnnData (cell-by-spot)."""
+    X = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.7, 0.2],
+        [0.2, 0.2, 0.6],
+        [0.1, 0.8, 0.1],
+        [0.6, 0.2, 0.2],
+    ])
+    obs = ad_sc_with_celltypes.obs.copy()
+    var = pd.DataFrame(index=ad_sp_with_segmentation.obs.index)
+    return sc.AnnData(X=X, obs=obs, var=var)
+
+
+# Tests for project_cell_annotations
+
+def test_project_cell_annotations_creates_obsm_array(ad_map_mock, ad_sp_with_segmentation):
+    """Test that project_cell_annotations stores array in obsm."""
+    tg.project_cell_annotations(ad_map_mock, ad_sp_with_segmentation, annotation="cell_type")
+    
+    assert "tangram_ct_pred" in ad_sp_with_segmentation.obsm
+    assert isinstance(ad_sp_with_segmentation.obsm["tangram_ct_pred"], np.ndarray)
+    assert ad_sp_with_segmentation.obsm["tangram_ct_pred"].shape == (3, 2)
+
+
+def test_project_cell_annotations_creates_uns_names(ad_map_mock, ad_sp_with_segmentation):
+    """Test that project_cell_annotations stores cell type names in uns."""
+    tg.project_cell_annotations(ad_map_mock, ad_sp_with_segmentation, annotation="cell_type")
+    
+    assert "tangram_ct_pred_names" in ad_sp_with_segmentation.uns
+    assert isinstance(ad_sp_with_segmentation.uns["tangram_ct_pred_names"], list)
+    assert set(ad_sp_with_segmentation.uns["tangram_ct_pred_names"]) == {"TypeA", "TypeB"}
+
+
+# Tests for count_cell_annotations
+
+def test_count_cell_annotations_missing_segmentation(ad_map_mock, ad_sc_with_celltypes):
+    """Test error when tangram_cell_segmentation is missing."""
+    ad_sp_no_seg = sc.AnnData(
+        X=np.array([[1, 2], [3, 4], [5, 6]]),
+        obs=pd.DataFrame(index=["spot_0", "spot_1", "spot_2"]),
+        var=pd.DataFrame(index=["gene_a", "gene_b"])
+    )
+    ad_sp_no_seg.obsm["spatial"] = np.array([[100, 200], [300, 400], [500, 600]])
+    ad_sp_no_seg.obsm["image_features"] = pd.DataFrame({
+        "segmentation_label": [2, 1, 2]
+    }, index=["spot_0", "spot_1", "spot_2"])
+    
+    with pytest.raises(ValueError) as exc_info:
+        tg.count_cell_annotations(ad_map_mock, ad_sc_with_celltypes, ad_sp_no_seg)
+    assert "Run `create_segment_cell_df`" in str(exc_info.value)
+
+
+def test_count_cell_annotations_creates_uns(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation):
+    """Test that count_cell_annotations stores DataFrame in uns (not obsm)."""
+    tg.count_cell_annotations(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation, annotation="cell_type")
+    
+    assert "tangram_ct_count" in ad_sp_with_segmentation.uns
+    assert isinstance(ad_sp_with_segmentation.uns["tangram_ct_count"], pd.DataFrame)
+
+
+def test_count_cell_annotations_centroids_from_uns(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation):
+    """Test that centroids are extracted from uns segmentation df."""
+    tg.count_cell_annotations(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation, annotation="cell_type")
+    
+    df = ad_sp_with_segmentation.uns["tangram_ct_count"]
+    
+    # spot_0 should have 2 centroids
+    spot0_centroids = df.loc["spot_0", "centroids"]
+    assert len(spot0_centroids) == 2
+    assert "spot_0_0" in spot0_centroids
+    assert "spot_0_1" in spot0_centroids
+
+
+# Tests for deconvolve_cell_annotations
+
+def test_deconvolve_missing_ct_count(ad_sp_with_segmentation):
+    """Test error when tangram_ct_count is missing."""
+    with pytest.raises(ValueError) as exc_info:
+        tg.deconvolve_cell_annotations(ad_sp_with_segmentation)
+    assert "Run `count_cell_annotations`" in str(exc_info.value)
+
+
+def test_deconvolve_reads_from_uns(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation):
+    """Test that deconvolution reads from uns."""
+    tg.project_cell_annotations(ad_map_mock, ad_sp_with_segmentation, annotation="cell_type")
+    tg.count_cell_annotations(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation, annotation="cell_type")
+    
+    result = tg.deconvolve_cell_annotations(ad_sp_with_segmentation)
+    
+    assert isinstance(result, sc.AnnData)
+    assert "spatial" in result.obsm
+    assert isinstance(result.obsm["spatial"], np.ndarray)
+    
+    valid_types = set(ad_sp_with_segmentation.uns["tangram_ct_pred_names"])
+    assert all(ct in valid_types for ct in result.obs["cluster"].unique())
+
+
+# Integration test
+
+def test_full_deconvolution_pipeline(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation):
+    """Test full pipeline with updated storage locations."""
+    tg.project_cell_annotations(ad_map_mock, ad_sp_with_segmentation, annotation="cell_type")
+    assert isinstance(ad_sp_with_segmentation.obsm["tangram_ct_pred"], np.ndarray)
+    assert isinstance(ad_sp_with_segmentation.uns["tangram_ct_pred_names"], list)
+    
+    tg.count_cell_annotations(ad_map_mock, ad_sc_with_celltypes, ad_sp_with_segmentation, annotation="cell_type")
+    assert isinstance(ad_sp_with_segmentation.uns["tangram_ct_count"], pd.DataFrame)
+    
+    result = tg.deconvolve_cell_annotations(ad_sp_with_segmentation)
+    assert isinstance(result, sc.AnnData)
+    assert isinstance(result.obsm["spatial"], np.ndarray)

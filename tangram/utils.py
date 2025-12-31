@@ -137,7 +137,7 @@ def project_cell_annotations(
         Cell's probability below this threshold will be dropped. Default is 0.5.
     Returns:
         None.
-        Update spatial Anndata by creating `obsm` `tangram_ct_pred` field with a dataframe with spatial prediction for each annotation (number_spots, number_annotations) 
+        Update spatial Anndata by creating `obsm` `tangram_ct_pred` field with spatial prediction array (number_spots, number_annotations) and `uns` `tangram_ct_pred_names` with annotation names. 
     """
 
     df = one_hot_encoding(adata_map.obs[annotation])
@@ -147,9 +147,10 @@ def project_cell_annotations(
     df_ct_prob = adata_map.X.T @ df
     df_ct_prob.index = adata_map.var.index
 
-    adata_sp.obsm["tangram_ct_pred"] = df_ct_prob
+    adata_sp.obsm["tangram_ct_pred"] = df_ct_prob.values
+    adata_sp.uns["tangram_ct_pred_names"] = list(df_ct_prob.columns)
     logging.info(
-        f"spatial prediction dataframe is saved in `obsm` `tangram_ct_pred` of the spatial AnnData."
+        f"spatial prediction is saved in `obsm` `tangram_ct_pred` (array) and `uns` `tangram_ct_pred_names` (cell type names) of the spatial AnnData."
     )
 
 
@@ -199,12 +200,7 @@ def create_segment_cell_df(adata_sp, drop_nan=True):
     logging.info(
         f"cell segmentation dataframe is saved in `uns` `tangram_cell_segmentation` of the spatial AnnData."
     )
-    ## redundant
-    # if save_obsm:
-    #     adata_sp.obsm["tangram_spot_centroids"] = centroids["centroids_idx"] ## join before this
-    #     logging.info(
-    #         f"spot centroids is saved in `obsm` `tangram_spot_centroids` of the spatial AnnData."
-    #     )
+
 
 def count_cell_annotations(
     adata_map, adata_sc, adata_sp, annotation="cell_type", threshold=0.5,
@@ -222,7 +218,7 @@ def count_cell_annotations(
     
     Returns:
         None.
-        Update spatial AnnData by creating `obsm` `tangram_ct_count` field which contains a dataframe that each row is a spot and each column has the cell count for each cell annotation (number_spots, number_annotations).
+        Update spatial AnnData by creating `uns` `tangram_ct_count` field which contains a dataframe that each row is a spot and each column has the cell count for each cell annotation (number_spots, number_annotations).
     
     """
 
@@ -236,10 +232,7 @@ def count_cell_annotations(
             "Missing parameter for tangram deconvolution. Run `sqidpy.im.calculate_image_features`."
         )
 
-    if (
-        "tangram_cell_segmentation" not in adata_sp.uns.keys()
-        or "tangram_spot_centroids" not in adata_sp.obsm.keys()
-    ):
+    if "tangram_cell_segmentation" not in adata_sp.uns.keys():
         raise ValueError(
             "Missing parameter for tangram deconvolution. Run `create_segment_cell_df`."
         )
@@ -249,10 +242,13 @@ def count_cell_annotations(
     cell_count = adata_sp.obsm["image_features"]["segmentation_label"]
 
     df_segmentation = adata_sp.uns["tangram_cell_segmentation"]
-    centroids = adata_sp.obsm["tangram_spot_centroids"]
+    
+    # Extract centroids per spot from uns["tangram_cell_segmentation"]
+    centroids_grouped = df_segmentation.groupby("spot_idx")["centroids"].apply(list)
+    centroids = [np.array(centroids_grouped.get(idx, []), dtype="object") for idx in adata_sp.obs.index]
 
     # create a dataframe
-    df_vox_cells = df_vox_cells = pd.DataFrame(
+    df_vox_cells = pd.DataFrame(
         data={"x": xs, "y": ys, "cell_n": cell_count, "centroids": centroids},
         index=list(adata_sp.obs.index),
     )
@@ -283,9 +279,9 @@ def count_cell_annotations(
     for k, v in vox_ct:
         df_vox_cells.iloc[k, df_vox_cells.columns.get_loc(v)] += 1
 
-    adata_sp.obsm["tangram_ct_count"] = df_vox_cells
+    adata_sp.uns["tangram_ct_count"] = df_vox_cells
     logging.info(
-        f"spatial cell count dataframe is saved in `obsm` `tangram_ct_count` of the spatial AnnData."
+        f"spatial cell count dataframe is saved in `uns` `tangram_ct_count` of the spatial AnnData."
     )
 
 
@@ -295,14 +291,14 @@ def deconvolve_cell_annotations(adata_sp, filter_cell_annotation=None):
 
     Args:
         adata_sp (AnnData): Spatial AnnData structure.
-        filter_cell_annotation (sequence): Optional. Sequence of cell annotation names to be considered for deconvolution. Default is None. When no values passed, all cell annotation names in adata_sp.obsm["tangram_ct_pred"] will be used.
+        filter_cell_annotation (sequence): Optional. Sequence of cell annotation names to be considered for deconvolution. Default is None. When no values passed, all cell annotation names in adata_sp.uns["tangram_ct_pred_names"] will be used.
 
     Returns:
         AnnData: Saves the cell annotation assignment result in its obs dataframe where each row representing a segmentation object, column 'x', 'y', 'centroids' contain its position and column 'cluster' is the assigned cell annotation.
     """
 
     if (
-        "tangram_ct_count" not in adata_sp.obsm.keys()
+        "tangram_ct_count" not in adata_sp.uns.keys()
         or "tangram_cell_segmentation" not in adata_sp.uns.keys()
     ):
         raise ValueError("Missing tangram parameters. Run `count_cell_annotations`.")
@@ -311,12 +307,12 @@ def deconvolve_cell_annotations(adata_sp, filter_cell_annotation=None):
 
     if filter_cell_annotation is None:
         filter_cell_annotation = pd.unique(
-            list(adata_sp.obsm["tangram_ct_pred"].columns)
+            adata_sp.uns["tangram_ct_pred_names"]
         )
     else:
         filter_cell_annotation = pd.unique(filter_cell_annotation)
 
-    df_vox_cells = adata_sp.obsm["tangram_ct_count"]
+    df_vox_cells = adata_sp.uns["tangram_ct_count"]
     cell_types_mapped = df_to_cell_types(df_vox_cells, filter_cell_annotation)
     df_list = []
     for k in cell_types_mapped.keys():
